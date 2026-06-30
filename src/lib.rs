@@ -73,6 +73,14 @@ pub struct DecodeResult {
 ///
 /// 当数据格式不合法时返回 [`DecodeError`]。
 pub fn decode_asb(data: &[u8]) -> Result<DecodeResult, DecodeError> {
+    decode_asb_with_encoding(data, encoding_rs::UTF_8)
+}
+
+/// 将 ASB 二进制数据解码为文本格式，并按指定编码解码字符串字段。
+pub fn decode_asb_with_encoding(
+    data: &[u8],
+    encoding: &'static encoding_rs::Encoding,
+) -> Result<DecodeResult, DecodeError> {
     if data.len() < 9 {
         return Err(DecodeError::TooShort);
     }
@@ -106,7 +114,7 @@ pub fn decode_asb(data: &[u8]) -> Result<DecodeResult, DecodeError> {
                 context: "名称".into(),
             });
         }
-        let name = r.read_string(name_len);
+        let name = r.read_string(name_len, encoding);
 
         match entry_type {
             1 => {
@@ -131,9 +139,9 @@ pub fn decode_asb(data: &[u8]) -> Result<DecodeResult, DecodeError> {
                         });
                     }
                     let kl = r.read_u32_le() as usize;
-                    let key = r.read_string(kl);
+                    let key = r.read_string(kl, encoding);
                     let vl = r.read_u32_le() as usize;
-                    let val = r.read_string(vl);
+                    let val = r.read_string(vl, encoding);
                     params.push(format!("{key}=\"{val}\""));
                 }
 
@@ -166,6 +174,14 @@ pub fn decode_asb_to_string(data: &[u8]) -> Result<String, DecodeError> {
     decode_asb(data).map(|r| r.text)
 }
 
+/// 便捷函数：按指定编码解码并返回文本字符串，忽略尾部残留字节。
+pub fn decode_asb_to_string_with_encoding(
+    data: &[u8],
+    encoding: &'static encoding_rs::Encoding,
+) -> Result<String, DecodeError> {
+    decode_asb_with_encoding(data, encoding).map(|r| r.text)
+}
+
 // ── 内部读取器 ──────────────────────────────────────────────
 
 struct Reader<'a> {
@@ -191,10 +207,11 @@ impl<'a> Reader<'a> {
     }
 
     /// 读取 `len` 字节的字符串，再跳过 1 字节 null 终止符。
-    fn read_string(&mut self, len: usize) -> String {
+    fn read_string(&mut self, len: usize, encoding: &'static encoding_rs::Encoding) -> String {
         let bytes = &self.data[self.pos..self.pos + len];
         self.pos += len + 1;
-        String::from_utf8_lossy(bytes).into_owned()
+        let (decoded, _, _) = encoding.decode(bytes);
+        decoded.into_owned()
     }
 
     fn remaining(&self) -> usize {
@@ -278,6 +295,38 @@ mod tests {
             result.text,
             "*main\r\n[jump label=\"start\"]\r\n*start\r\n[return]\r\n"
         );
+    }
+
+    #[test]
+    fn decode_shift_jis_string_fields_with_configured_encoding() {
+        let mut buf: Vec<u8> = Vec::new();
+        let (value, _, _) = encoding_rs::SHIFT_JIS.encode("これはテストです");
+
+        buf.extend_from_slice(b"ASB\x00");
+        buf.push(0x00);
+        buf.extend_from_slice(&2u32.to_le_bytes());
+
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.extend_from_slice(&4u32.to_le_bytes());
+        buf.extend_from_slice(b"main");
+        buf.push(0x00);
+
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&4u32.to_le_bytes());
+        buf.extend_from_slice(b"text");
+        buf.push(0x00);
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.extend_from_slice(&4u32.to_le_bytes());
+        buf.extend_from_slice(b"body");
+        buf.push(0x00);
+        buf.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&value);
+        buf.push(0x00);
+
+        let result = decode_asb_with_encoding(&buf, encoding_rs::SHIFT_JIS).unwrap();
+
+        assert_eq!(result.text, "*main\r\n[text body=\"これはテストです\"]\r\n");
     }
 }
 
